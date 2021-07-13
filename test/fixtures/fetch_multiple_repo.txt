@@ -1,0 +1,1200 @@
+import github
+
+
+class Handler:
+    def __init__(self, name: str, auth: str):
+        self.repo = github.Github(auth).get_repo(name)
+
+    def get_file(self, file_path: str, commit: [str, None]):
+
+        content = \
+            self.repo.get_contents(file_path, ref=commit) \
+            if commit is not None \
+            else self.repo.get_contents(file_path)
+
+        return content.decoded_content.decode("utf-8")
+
+    def get_files(self, files: list, commit: [str, None]):
+        return [self.get_file(file, commit) for file in files]
+
+
+class Fetch:
+
+    @staticmethod
+    def fetch(targets: list, auth: [str, None]):
+
+        ret = []
+        for t in targets:
+            auth = t.get("token") if t.get("token") is not None else auth
+            ret.append(
+                Handler(t.get("name"), auth).get_files(t.get("files"), t.get("commit"))
+            )
+
+        return ret
+
+    @staticmethod
+    def build(dest: str, dependencies: list):
+
+        with open(dest, "w") as out:
+            for dep in dependencies:
+                for file in dep:
+                    out.write(file)
+                    out.write("\n")
+
+    def fetch_and_build(self, dest: str, targets: list, token: [str, None]):
+
+        dependencies = self.fetch(targets, token)
+        self.build(dest, dependencies)
+
+"""Common cryptographic primitives for OT and OPRF.
+
+Python library that serves as an API for common primitives
+used to implement OPRF and OT protocols.
+"""
+
+from __future__ import annotations
+from typing import Union, Optional
+import doctest
+import platform
+import hashlib
+import ctypes
+import ctypes.util
+import secrets
+import base64
+import ge25519
+
+#
+# Use native Python implementations of primitives by default.
+#
+
+def _zero(n: bytes) -> bool:
+    d = 0
+    for b in n:
+        d |= b
+    return ((d - 1) >> 8) % 2 == 1
+
+_sc25519_is_canonical_L = [ # 2^252+27742317777372353535851937790883648493.
+    0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7,
+    0xa2, 0xde, 0xf9, 0xde, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10
+]
+
+def _sc25519_is_canonical(s: bytes) -> bool:
+    c = 0
+    n = 1
+    for i in range(31, -1, -1):
+        c |= ((s[i] - _sc25519_is_canonical_L[i]) >> 8) & n
+        n &= ((s[i] ^ _sc25519_is_canonical_L[i]) - 1) >> 8
+    return c != 0
+
+def _sc25519_mul(a: bytes, b: bytes) -> bytes:
+    (a, b) = (int.from_bytes(a, 'little'), int.from_bytes(b, 'little'))
+    return ((a * b) % (pow(2, 252) + 27742317777372353535851937790883648493)).to_bytes(32, 'little')
+
+def _sc25519_sqmul(s: bytes, n: int, a: bytes) -> bytes:
+    for _ in range(n):
+        s = _sc25519_mul(s, s)
+    return _sc25519_mul(s, a)
+
+def _sc25519_invert(s: bytes) -> bytes:
+    b_10 = _sc25519_mul(s, s)
+    b_100 = _sc25519_mul(b_10, b_10)
+    b_11 = _sc25519_mul(b_10, s)
+    b_101 = _sc25519_mul(b_10, b_11)
+    b_111 = _sc25519_mul(b_10, b_101)
+    b_1001 = _sc25519_mul(b_10, b_111)
+    b_1011 = _sc25519_mul(b_10, b_1001)
+    b_1111 = _sc25519_mul(b_100, b_1011)
+    recip = _sc25519_mul(b_1111, s)
+
+    recip = _sc25519_sqmul(recip, 123 + 3, b_101)
+    recip = _sc25519_sqmul(recip, 2 + 2, b_11)
+    recip = _sc25519_sqmul(recip, 1 + 4, b_1111)
+    recip = _sc25519_sqmul(recip, 1 + 4, b_1111)
+    recip = _sc25519_sqmul(recip, 4, b_1001)
+    recip = _sc25519_sqmul(recip, 2, b_11)
+    recip = _sc25519_sqmul(recip, 1 + 4, b_1111)
+    recip = _sc25519_sqmul(recip, 1 + 3, b_101)
+    recip = _sc25519_sqmul(recip, 3 + 3, b_101)
+    recip = _sc25519_sqmul(recip, 3, b_111)
+    recip = _sc25519_sqmul(recip, 1 + 4, b_1111)
+    recip = _sc25519_sqmul(recip, 2 + 3, b_111)
+    recip = _sc25519_sqmul(recip, 2 + 2, b_11)
+    recip = _sc25519_sqmul(recip, 1 + 4, b_1011)
+    recip = _sc25519_sqmul(recip, 2 + 4, b_1011)
+    recip = _sc25519_sqmul(recip, 6 + 4, b_1001)
+    recip = _sc25519_sqmul(recip, 2 + 2, b_11)
+    recip = _sc25519_sqmul(recip, 3 + 2, b_11)
+    recip = _sc25519_sqmul(recip, 3 + 2, b_11)
+    recip = _sc25519_sqmul(recip, 1 + 4, b_1001)
+    recip = _sc25519_sqmul(recip, 1 + 3, b_111)
+    recip = _sc25519_sqmul(recip, 2 + 4, b_1111)
+    recip = _sc25519_sqmul(recip, 1 + 4, b_1011)
+    recip = _sc25519_sqmul(recip, 3, b_101)
+    recip = _sc25519_sqmul(recip, 2 + 4, b_1111)
+    recip = _sc25519_sqmul(recip, 3, b_101)
+    recip = _sc25519_sqmul(recip, 1 + 2, b_11)
+
+    return recip
+
+def _ristretto255_is_canonical(s: bytes) -> bool:
+    c = ((s[31] & 0x7f) ^ 0x7f) % 256
+    for i in range(30, 0, -1):
+        c |= (s[i] ^ 0xff) % 256
+    c = (c - 1) >> 8
+    d = ((0xed - 1 - s[0]) >> 8) % 256
+    return (1 - (((c & d) | s[0]) & 1)) == 1
+
+class native:
+    """
+    Wrapper class for native Python implementations of
+    primitive operations.
+    """
+
+    @staticmethod
+    def rnd() -> bytes:
+        """Return random non-zero scalar."""
+        while True:
+            r = bytearray(secrets.token_bytes(32))
+            r[-1] &= 0x1f
+            if _sc25519_is_canonical(r) and not _zero(r):
+                return r
+
+    @classmethod
+    def scl(cls, s: bytes = None) -> Optional[bytes]:
+        """
+        Return supplied byte vector if it is a valid scalar; otherwise, return
+        `None`. If no byte vector is supplied, return a random scalar.
+        """
+        if s is None:
+            return cls.rnd()
+
+        s = bytearray(s)
+        s[-1] &= 0x1f
+
+        if _sc25519_is_canonical(s) and not _zero(s):
+            return bytes(s)
+
+        return None
+
+    @staticmethod
+    def inv(s: bytes) -> bytes:
+        """
+        Return inverse of scalar modulo
+        2**252 + 27742317777372353535851937790883648493.
+        """
+        return _sc25519_invert(s)
+
+    @staticmethod
+    def smu(s: bytes, t: bytes) -> bytes:
+        """Return scalar multiplied by another scalar."""
+        return _sc25519_mul(s, t)
+
+    @staticmethod
+    def pnt(h: bytes = None) -> bytes:
+        """Return point from 64-byte vector (normally obtained via hashing)."""
+        return ge25519.ge25519_p3.from_hash_ristretto255(
+            hashlib.sha512(native.rnd()).digest() if h is None else h
+        )
+
+    @staticmethod
+    def bas(s: bytes) -> bytes:
+        """Return base point multiplied by supplied scalar."""
+        t = bytearray(s)
+        t[31] &= 127
+
+        q = ge25519.ge25519_p3.scalar_mult_base(t).to_bytes_ristretto255()
+        return None if _zero(q) else q
+
+    @staticmethod
+    def mul(s: bytes, p: bytes) -> bytes:
+        """Return point multiplied by supplied scalar."""
+        p3 = ge25519.ge25519_p3.from_bytes_ristretto255(p)
+        if not _ristretto255_is_canonical(p) or p3 is None:
+            return None # pragma: no cover
+
+        t = bytearray(s)
+        t[31] &= 127
+
+        q = p3.scalar_mult(t).to_bytes_ristretto255()
+        return None if _zero(q) else q
+
+    @staticmethod
+    def add(p: bytes, q: bytes) -> bytes:
+        """Return sum of the supplied points."""
+        p_p3 = ge25519.ge25519_p3.from_bytes_ristretto255(p)
+        q_p3 = ge25519.ge25519_p3.from_bytes_ristretto255(q)
+        if not _ristretto255_is_canonical(p) or p_p3 is None or\
+           not _ristretto255_is_canonical(q) or q_p3 is None:
+            return None # pragma: no cover
+
+        q_cached = ge25519.ge25519_cached.from_p3(q_p3)
+        r_p1p1 = ge25519.ge25519_p1p1.add(p_p3, q_cached)
+        r_p3 = ge25519.ge25519_p3.from_p1p1(r_p1p1)
+        return r_p3.to_bytes_ristretto255()
+
+    @staticmethod
+    def sub(p: bytes, q: bytes) -> bytes:
+        """Return result of subtracting second point from first point."""
+        p_p3 = ge25519.ge25519_p3.from_bytes_ristretto255(p)
+        q_p3 = ge25519.ge25519_p3.from_bytes_ristretto255(q)
+        if not _ristretto255_is_canonical(p) or p_p3 is None or\
+           not _ristretto255_is_canonical(q) or q_p3 is None:
+            return None # pragma: no cover
+
+        q_cached = ge25519.ge25519_cached.from_p3(q_p3)
+        r_p1p1 = ge25519.ge25519_p1p1.sub(p_p3, q_cached)
+        r_p3 = ge25519.ge25519_p3.from_p1p1(r_p1p1)
+        return r_p3.to_bytes_ristretto255()
+
+# Top-level best-effort synonyms.
+scl = native.scl
+rnd = native.rnd
+inv = native.inv
+smu = native.smu
+pnt = native.pnt
+bas = native.bas
+mul = native.mul
+add = native.add
+sub = native.sub
+
+#
+# Wrapper classes for bytes.
+#
+
+class point(bytes):
+    """
+    Wrapper class for a bytes-like object that corresponds
+    to a point.
+    """
+
+    @classmethod
+    def random(cls) -> point:
+        """Return random point object."""
+        return bytes.__new__(cls, native.pnt())
+
+    @classmethod
+    def bytes(cls, bs: bytes) -> point:
+        """Return point object obtained by transforming supplied bytes-like object."""
+        return bytes.__new__(cls, native.pnt(bs))
+
+    @classmethod
+    def hash(cls, bs: bytes) -> point:
+        """Return point object by hashing supplied bytes-like object."""
+        return bytes.__new__(cls, native.pnt(hashlib.sha512(bs).digest()))
+
+    @classmethod
+    def base(cls, s: scalar) -> Optional[point]:
+        """
+        Return base point multiplied by supplied scalar
+        if the scalar is valid; otherwise, return `None`.
+        """
+        p = native.bas(s)
+        return bytes.__new__(cls, p) if p is not None else None
+
+    @classmethod
+    def from_base64(cls, s: str) -> point:
+        """Convert Base64 UTF-8 string representation of a point to a point instance."""
+        return bytes.__new__(cls, base64.standard_b64decode(s))
+
+    def __new__(cls, bs: bytes = None) -> point:
+        """
+        Return point object corresponding to supplied bytes object.
+        No checking is performed to confirm that the bytes-like object
+        is a valid point.
+        """
+        return bytes.__new__(cls, bs) if bs is not None else cls.random()
+
+    def __mul__(self: point, other):
+        """A point cannot be a left-hand argument."""
+        raise TypeError('point must be on right-hand side of multiplication operator')
+
+    def __rmul__(self: point, other: scalar) -> point:
+        """Return point multiplied by supplied scalar."""
+        return native.point(native.mul(other, self))
+
+    def __add__(self: point, other: point) -> point:
+        """Return sum of the supplied points."""
+        return native.point(native.add(self, other))
+
+    def __sub__(self: point, other: point) -> point:
+        """Return result of subtracting second point from first point."""
+        return native.point(native.sub(self, other))
+
+    def to_base64(self: point) -> str:
+        """Convert to equivalent Base64 UTF-8 string representation."""
+        return base64.standard_b64encode(self).decode('utf-8')
+
+class scalar(bytes):
+    """
+    Wrapper class for a bytes-like object that corresponds
+    to a scalar.
+    """
+
+    @classmethod
+    def random(cls) -> scalar:
+        """Return random non-zero scalar object."""
+        return bytes.__new__(cls, native.rnd())
+
+    @classmethod
+    def bytes(cls, bs: bytes) -> Optional[scalar]:
+        """
+        Return scalar object obtained by transforming supplied bytes-like
+        object if it is possible to do; otherwise, return `None`.
+        """
+        s = native.scl(bs)
+        return bytes.__new__(cls, s) if s is not None else None
+
+    @classmethod
+    def hash(cls, bs: bytes) -> scalar:
+        """Return scalar object by hashing supplied bytes-like object."""
+        h = hashlib.sha256(bs).digest()
+        s = native.scl(h)
+        while s is None:
+            h = hashlib.sha256(h).digest()
+            s = native.scl(h)
+        return bytes.__new__(cls, s)
+
+    @classmethod
+    def from_base64(cls, s: str) -> scalar:
+        """Convert Base64 UTF-8 string representation of a scalar to a scalar instance."""
+        return bytes.__new__(cls, base64.standard_b64decode(s))
+
+    def __new__(cls, bs: bytes = None) -> scalar:
+        """
+        Return scalar object corresponding to supplied bytes-like object.
+        No checking is performed to confirm that the bytes-like object
+        is a valid scalar.
+        """
+        return bytes.__new__(cls, bs) if bs is not None else cls.random()
+
+    def __invert__(self: scalar) -> scalar:
+        """
+        Return inverse of scalar modulo
+        2**252 + 27742317777372353535851937790883648493.
+        """
+        return native.scalar(native.inv(self))
+
+    def inverse(self: scalar) -> scalar:
+        """
+        Return inverse of scalar modulo
+        2**252 + 27742317777372353535851937790883648493.
+        """
+        return native.scalar(native.inv(self))
+
+    # pylint: disable=E1136
+    def __mul__(self: scalar, other: Union[scalar, point]) -> Union[scalar, point]:
+        """Multiply supplied scalar or point by this scalar."""
+        if isinstance(other, native.scalar) or\
+           (sodium is not None and isinstance(other, sodium.scalar)):
+            return native.scalar(native.smu(self, other))
+        return native.point(native.mul(self, other))
+
+    # pylint: disable=E1136
+    def __rmul__(self: scalar, other: Union[scalar, point]):
+        """A scalar cannot be on the right-hand side of a non-scalar."""
+        raise TypeError('scalar must be on left-hand side of multiplication operator')
+
+    def to_base64(self: scalar) -> str:
+        """Convert to equivalent Base64 UTF-8 string representation."""
+        return base64.standard_b64encode(self).decode('utf-8')
+
+# Access to wrapper classes for bytes.
+native.point = point
+native.scalar = scalar
+
+#
+# Attempt to load primitives from libsodium, if it is present.
+#
+
+try:
+    xdll = ctypes.windll if platform.system() == 'Windows' else ctypes.cdll
+    _sodium =\
+        xdll.LoadLibrary(\
+            ctypes.util.find_library('sodium') or\
+            ctypes.util.find_library('libsodium')\
+        )
+
+    # Ensure the detected version of libsodium has the necessary primitives.
+    assert hasattr(_sodium, 'crypto_box_secretkeybytes')
+    assert hasattr(_sodium, 'crypto_box_publickeybytes')
+    assert hasattr(_sodium, 'crypto_core_ristretto255_bytes')
+    assert hasattr(_sodium, 'crypto_core_ristretto255_scalar_random')
+    assert hasattr(_sodium, 'crypto_scalarmult_ristretto255_base')
+    assert hasattr(_sodium, 'crypto_scalarmult_ristretto255')
+    assert hasattr(_sodium, 'crypto_core_ristretto255_add')
+    assert hasattr(_sodium, 'crypto_core_ristretto255_sub')
+
+    # Exported symbol.
+    class sodium:
+        """
+        Wrapper class for native Python implementations of
+        primitive operations.
+        """
+
+        @staticmethod
+        def rnd() -> bytes:
+            """Return random non-zero scalar."""
+            buf = ctypes.create_string_buffer(_sodium.crypto_box_secretkeybytes())
+            _sodium.crypto_core_ristretto255_scalar_random(buf)
+            return buf.raw
+
+        @classmethod
+        def scl(cls, s: bytes = None) -> Optional[bytes]:
+            """
+            Return supplied byte vector if it is a valid scalar; otherwise, return
+            `None`. If no byte vector is supplied, return a random scalar.
+            """
+            if s is None:
+                return cls.rnd()
+
+            s = bytearray(s)
+            s[-1] &= 0x1f
+
+            if _sc25519_is_canonical(s) and not _zero(s):
+                return bytes(s)
+
+            return None
+
+        @staticmethod
+        def inv(s: bytes) -> bytes:
+            """
+            Return inverse of scalar modulo
+            2**252 + 27742317777372353535851937790883648493.
+            """
+            buf = ctypes.create_string_buffer(_sodium.crypto_box_secretkeybytes())
+            _sodium.crypto_core_ristretto255_scalar_invert(buf, bytes(s))
+            return buf.raw
+
+        @staticmethod
+        def smu(s: bytes, t: bytes) -> bytes:
+            """
+            Return scalar multiplied by another scalar modulo
+            2**252 + 27742317777372353535851937790883648493.
+            """
+            buf = ctypes.create_string_buffer(_sodium.crypto_box_secretkeybytes())
+            _sodium.crypto_core_ristretto255_scalar_mul(buf, bytes(s), bytes(t))
+            return buf.raw
+
+        @staticmethod
+        def pnt(h: bytes = None) -> bytes:
+            """Return point from 64-byte hash."""
+            buf = ctypes.create_string_buffer(_sodium.crypto_core_ristretto255_bytes())
+            _sodium.crypto_core_ristretto255_from_hash(buf, bytes(
+                hashlib.sha512(sodium.rnd()).digest() if h is None else h
+            ))
+            return buf.raw
+
+        @staticmethod
+        def bas(e: bytes) -> bytes:
+            """Return base point multiplied by supplied scalar."""
+            buf = ctypes.create_string_buffer(_sodium.crypto_box_publickeybytes())
+            _sodium.crypto_scalarmult_ristretto255_base(buf, bytes(e))
+            return buf.raw
+
+        @staticmethod
+        def mul(s: bytes, p: bytes) -> bytes:
+            """Return point multiplied by supplied scalar."""
+            buf = ctypes.create_string_buffer(_sodium.crypto_box_secretkeybytes())
+            _sodium.crypto_scalarmult_ristretto255(buf, bytes(s), bytes(p))
+            return buf.raw
+
+        @staticmethod
+        def add(x: bytes, y: bytes) -> bytes:
+            """Return sum of the supplied points."""
+            buf = ctypes.create_string_buffer(_sodium.crypto_core_ristretto255_bytes())
+            _sodium.crypto_core_ristretto255_add(buf, bytes(x), bytes(y))
+            return buf.raw
+
+        @staticmethod
+        def sub(x: bytes, y: bytes) -> bytes:
+            """Return result of subtracting second point from first point."""
+            buf = ctypes.create_string_buffer(_sodium.crypto_core_ristretto255_bytes())
+            _sodium.crypto_core_ristretto255_sub(buf, bytes(x), bytes(y))
+            return buf.raw
+
+    # Top-level best-effort synonyms.
+    scl = sodium.scl
+    rnd = sodium.rnd
+    inv = sodium.inv
+    smu = sodium.smu
+    pnt = sodium.pnt
+    bas = sodium.bas
+    mul = sodium.mul
+    add = sodium.add
+    sub = sodium.sub
+
+    #
+    # Dedicated point and scalar data structures derived from `bytes`.
+    #
+
+    class point(bytes):
+        """
+        Wrapper class for a bytes-like object that corresponds
+        to a point.
+        """
+
+        @classmethod
+        def random(cls) -> point:
+            """Return random point object."""
+            return bytes.__new__(cls, sodium.pnt())
+
+        @classmethod
+        def bytes(cls, bs: bytes) -> point:
+            """Return point object obtained by transforming supplied bytes-like object."""
+            return bytes.__new__(cls, sodium.pnt(bs))
+
+        @classmethod
+        def hash(cls, bs: bytes) -> point:
+            """Return point object by hashing supplied bytes-like object."""
+            return bytes.__new__(cls, sodium.pnt(hashlib.sha512(bs).digest()))
+
+        @classmethod
+        def base(cls, s: scalar) -> point:
+            """
+            Return base point multiplied by supplied scalar
+            if the scalar is valid; otherwise, return `None`.
+            """
+            p = sodium.bas(s)
+            return bytes.__new__(cls, p) if p is not None else None
+
+        @classmethod
+        def from_base64(cls, s: str) -> point:
+            """Convert Base64 UTF-8 string representation of a point to a point instance."""
+            return bytes.__new__(cls, base64.standard_b64decode(s))
+
+        def __new__(cls, bs: bytes = None) -> point:
+            """
+            Return point object corresponding to supplied bytes-like object.
+            No checking is performed to confirm that the bytes-like object
+            is a valid point.
+            """
+            return bytes.__new__(cls, bs) if bs is not None else cls.random()
+
+        def __mul__(self: point, other):
+            """A point cannot be a left-hand argument."""
+            raise TypeError('point must be on right-hand side of multiplication operator')
+
+        def __rmul__(self: point, other: scalar) -> point:
+            """Return point multiplied by supplied scalar."""
+            return sodium.point(sodium.mul(other, self))
+
+        def __add__(self: point, other: point) -> point:
+            """Return sum of the supplied points."""
+            return sodium.point(sodium.add(self, other))
+
+        def __sub__(self: point, other: point) -> point:
+            """Return result of subtracting second point from first point."""
+            return sodium.point(sodium.sub(self, other))
+
+        def to_base64(self: point) -> str:
+            """Convert to equivalent Base64 UTF-8 string representation."""
+            return base64.standard_b64encode(self).decode('utf-8')
+
+    class scalar(bytes):
+        """
+        Wrapper class for a bytes-like object that corresponds
+        to a scalar.
+        """
+
+        @classmethod
+        def random(cls) -> scalar:
+            """Return random non-zero scalar object."""
+            return bytes.__new__(cls, sodium.rnd())
+
+        @classmethod
+        def bytes(cls, bs: bytes) -> Optional[scalar]:
+            """
+            Return scalar object obtained by transforming supplied bytes-like
+            object if it is possible to do; otherwise, return `None`.
+            """
+            s = sodium.scl(bs)
+            return bytes.__new__(cls, s) if s is not None else None
+
+        @classmethod
+        def hash(cls, bs: bytes) -> scalar:
+            """Return scalar object by hashing supplied bytes-like object."""
+            h = hashlib.sha256(bs).digest()
+            s = sodium.scl(h)
+            while s is None:
+                h = hashlib.sha256(h).digest()
+                s = sodium.scl(h)
+            return bytes.__new__(cls, s)
+
+        @classmethod
+        def from_base64(cls, s: str) -> scalar:
+            """Convert Base64 UTF-8 string representation of a scalar to a scalar instance."""
+            return bytes.__new__(cls, base64.standard_b64decode(s))
+
+        def __new__(cls, bs: bytes = None) -> scalar:
+            """
+            Return scalar object corresponding to supplied bytes-like object.
+            No checking is performed to confirm that the bytes-like object
+            is a valid scalar.
+            """
+            return bytes.__new__(cls, bs) if bs is not None else cls.random()
+
+        def __invert__(self: scalar) -> scalar:
+            """
+            Return inverse of scalar modulo
+            2**252 + 27742317777372353535851937790883648493.
+            """
+            return sodium.scalar(sodium.inv(self))
+
+        def inverse(self: scalar)  -> scalar:
+            """
+            Return inverse of scalar modulo
+            2**252 + 27742317777372353535851937790883648493.
+            """
+            return sodium.scalar(sodium.inv(self))
+
+        # pylint: disable=E1136
+        def __mul__(self: scalar, other: Union[scalar, point]) -> Union[scalar, point]:
+            """Multiply supplied scalar or point by this scalar."""
+            if isinstance(other, (native.scalar, sodium.scalar)):
+                return sodium.scalar(sodium.smu(self, other))
+            return sodium.point(sodium.mul(self, other))
+
+        # pylint: disable=E1136
+        def __rmul__(self: scalar, other: Union[scalar, point]):
+            """A scalar cannot be on the right-hand side of a non-scalar."""
+            raise TypeError('scalar must be on left-hand side of multiplication operator')
+
+        def to_base64(self: scalar) -> str:
+            """Convert to equivalent Base64 UTF-8 string representation."""
+            return base64.standard_b64encode(self).decode('utf-8')
+
+    # Access to wrapper classes for bytes.
+    sodium.point = point
+    sodium.scalar = scalar
+
+except: # pragma: no cover
+    # Exported symbol.
+    sodium = None # pragma: no cover
+
+"""Functional and algebraic unit tests for primitives and classes.
+
+Test suite containing functional unit tests for the exported primitives and
+classes, as well as unit tests confirming algebraic relationships among
+primitives.
+"""
+# pylint: disable=C0103,C0116
+
+from importlib import import_module
+import base64
+from bitlist import bitlist
+from fountains import fountains
+from unittest import TestCase # pylint: disable=C0411
+
+import oblivious.oblivious as oblivious
+
+# To simulate an environment in which sodium is absent, some tests set
+# `oblivious.sodium` to `None`; the reference below is used for restoration.
+oblivious.sodium_restore = oblivious.sodium
+
+def api_methods():
+    """
+    API symbols that should be available to users upon module import.
+    """
+    return {
+        'point', 'scalar',
+        'scl', 'rnd', 'inv', 'smu',
+        'pnt', 'bas', 'mul', 'add', 'sub'
+    }
+
+class Test_namespace(TestCase):
+    """
+    Check that namespaces provide access to the expected
+    classes and functions.
+    """
+
+    def test_init(self):
+        init = import_module('oblivious.__init__')
+        self.assertTrue('native' in init.__dict__)
+        self.assertTrue('sodium' in init.__dict__)
+        self.assertTrue(api_methods().issubset(init.__dict__.keys()))
+
+    def test_module(self):
+        module = import_module('oblivious.oblivious')
+        self.assertTrue('native' in module.__dict__)
+        self.assertTrue('sodium' in module.__dict__)
+        self.assertTrue(api_methods().issubset(module.__dict__.keys()))
+
+    def test_native(self):
+        self.assertTrue(api_methods().issubset(set(dir(oblivious.native))))
+
+    def test_sodium(self):
+        if oblivious.sodium is not None:
+            self.assertTrue(api_methods().issubset(set(dir(oblivious.sodium))))
+
+def check_or_generate_operation(test, fun, lengths, bits): # pylint: disable=R1710
+    """
+    This function does either of two things depending on `bits`:
+    * checks that test inputs drawn from the fountains input bit stream
+      produce the bits provided in the reference output bit vector, or
+    * generates a reference output bit vector by applying the function
+      to the fountains input bit stream.
+    """
+    fs = fountains( # Generate the input bit stream.
+        sum(lengths),
+        seed=bytes(0), # This is also the default; explicit for clarity.
+        limit=256,
+        bits=bits, # Reference output bit vector.
+        function=fun
+    )
+
+    if bits is None: # There is no output reference bit vector, so test is not possible.
+        return bitlist(list(fs)).hex() # Return reference output bits for test.
+
+    test.assertTrue(all(fs)) # Check that all outputs match.
+
+def define_classes(cls, sodium_hidden=False): # pylint: disable=R0915
+    """
+    Define and return four classes of unit tests given a wrapper
+    class (`native` or `sodium`) for primitive operations.
+    """
+
+    class Test_primitives(TestCase):
+        """
+        Direct tests of primitive operators that operate on bytes-like objects.
+        """
+
+        def test_rnd(self):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            for _ in range(256):
+                s = cls.rnd()
+                self.assertTrue(len(s) == 32 and cls.scl(s))
+
+        def test_scl_none(self):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            for _ in range(256):
+                s = cls.scl()
+                self.assertTrue(len(s) == 32 and cls.scl(s))
+
+        def test_scl(
+                self,
+                bits='4df8fe738c097afa7f255b10c3ab118eeb73e38935605042ccb7581c73f1e5e9'
+            ):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            fun = lambda bs: bitlist([1 if cls.scl(bs) is not None else 0])
+            return check_or_generate_operation(self, fun, [32], bits)
+
+        def test_inv(
+                self,
+                bits='41c07230000960b274044a0080a8018aa0114380150000028c2700006081e1e1'
+            ):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            def fun(bs):
+                s = cls.scl(bs)
+                return cls.inv(s) if s is not None else bytes([0])
+            return check_or_generate_operation(self, fun, [32], bits)
+
+        def test_smu(
+                self,
+                bits='2ca120487000010295804000850254008018000000008000080100008400000c'
+            ):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            def fun(bs):
+                (s1, s2) = (cls.scl(bs[:32]), cls.scl(bs[32:]))
+                return\
+                    cls.smu(s1, s2)\
+                    if s1 is not None and s2 is not None else\
+                    bytes([0])
+            return check_or_generate_operation(self, fun, [32, 32], bits)
+
+        def test_pnt_none(self):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            for _ in range(256):
+                self.assertTrue(len(cls.pnt()) == 32)
+
+        def test_pnt(
+                self,
+                bits='baf12de24e54deae0aa116816bf5eee23b1168c78e892372e08a9884de9d4c1b'
+            ):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            return check_or_generate_operation(self, cls.pnt, [64], bits)
+
+        def test_bas(
+                self,
+                bits='00386671840148d05620421002a2110aa800e289010040404cb2101c20e165a0'
+            ):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            def fun(bs):
+                s = cls.scl(bs)
+                return cls.bas(s) if s is not None else bytes([0])
+            return check_or_generate_operation(self, fun, [32], bits)
+
+        def test_mul(
+                self,
+                bits='2c040004500080008180400080000008a1180020001080080211004000080040'
+            ):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            def fun(bs):
+                (s1, s2) = (cls.scl(bs[:32]), cls.scl(bs[32:]))
+                return\
+                    cls.mul(s2, cls.bas(s1))\
+                    if s1 is not None and s2 is not None else\
+                    bytes([0])
+            return check_or_generate_operation(self, fun, [32, 32], bits)
+
+        def test_add(
+                self,
+                bits='28400040500000008480000020024c00211800080000800002110040ac001044'
+            ):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            def fun(bs):
+                (s1, s2) = (cls.scl(bs[:32]), cls.scl(bs[32:]))
+                return\
+                    cls.add(cls.bas(s1), cls.bas(s2))\
+                    if s1 is not None and s2 is not None else\
+                    bytes([0])
+            return check_or_generate_operation(self, fun, [32, 32], bits)
+
+        def test_sub(
+                self,
+                bits='24210008500080028000000025020c08000001200000800002008002ac081040'
+            ):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            def fun(bs):
+                (s1, s2) = (cls.scl(bs[:32]), cls.scl(bs[32:]))
+                return\
+                    cls.sub(cls.bas(s1), cls.bas(s2))\
+                    if s1 is not None and s2 is not None else\
+                    bytes([0])
+            return check_or_generate_operation(self, fun, [32, 32], bits)
+
+    class Test_classes(TestCase):
+        """
+        Tests of point and scalar wrapper classes and their methods.
+        """
+
+        def test_point_random(self):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            for _ in range(256):
+                self.assertTrue(len(cls.point.random()) == 32)
+
+        def test_point_bytes(
+                self,
+                bits='baf12de24e54deae0aa116816bf5eee23b1168c78e892372e08a9884de9d4c1b'
+            ):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            return check_or_generate_operation(self, cls.point.bytes, [64], bits)
+
+        def test_point_hash(
+                self,
+                bits='10cb044c737b034d5755f8ba0e29432745ed4fb1a78ea22a15b2d1113492841b'
+            ):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            return check_or_generate_operation(self, cls.point.hash, [64], bits)
+
+        def test_point_base(
+                self,
+                bits='00386671840148d05620421002a2110aa800e289010040404cb2101c20e165a0'
+            ):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            def fun(bs):
+                s = cls.scalar.bytes(bs)
+                return cls.point.base(s) if s is not None else bytes([0])
+            return check_or_generate_operation(self, fun, [32], bits)
+
+        def test_point_base64(self):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            for _ in range(256):
+                p = cls.point()
+                p_b64 = base64.standard_b64encode(p).decode('utf-8')
+                self.assertEqual(p.to_base64(), p_b64)
+                self.assertEqual(cls.point.from_base64(p_b64), p)
+
+        def test_point(self):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            for _ in range(256):
+                self.assertTrue(len(cls.point()) == 32)
+
+        def test_point_rmul(
+                self,
+                bits='2c040004500080008180400080000008a1180020001080080211004000080040'
+            ):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            def fun(bs):
+                (s1, s2) = (cls.scalar.bytes(bs[:32]), cls.scalar.bytes(bs[32:]))
+                return\
+                    cls.point.base(s2).__rmul__(s1)\
+                    if s1 is not None and s2 is not None else\
+                    bytes([0])
+            return check_or_generate_operation(self, fun, [32, 32], bits)
+
+        def test_point_scalar_mul_op(
+                self,
+                bits='2c040004500080008180400080000008a1180020001080080211004000080040'
+            ):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            def fun(bs):
+                (s1, s2) = (cls.scalar.bytes(bs[:32]), cls.scalar.bytes(bs[32:]))
+                # Below, `*` invokes `scalar.__mul__`, which delegates to `mul`
+                # due to the type of the second argument.
+                return\
+                    s1 * cls.point.base(s2)\
+                    if s1 is not None and s2 is not None else\
+                    bytes([0])
+            return check_or_generate_operation(self, fun, [32, 32], bits)
+
+        def test_point_add(
+                self,
+                bits='28400040500000008480000020024c00211800080000800002110040ac001044'
+            ):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            def fun(bs):
+                (s1, s2) = (cls.scalar.bytes(bs[:32]), cls.scalar.bytes(bs[32:]))
+                return\
+                    cls.point.base(s1) + cls.point.base(s2)\
+                    if s1 is not None and s2 is not None else\
+                    bytes([0])
+            return check_or_generate_operation(self, fun, [32, 32], bits)
+
+        def test_point_sub(
+                self,
+                bits='24210008500080028000000025020c08000001200000800002008002ac081040'
+            ):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            def fun(bs):
+                (s1, s2) = (cls.scalar.bytes(bs[:32]), cls.scalar.bytes(bs[32:]))
+                return\
+                    cls.point.base(s1) - cls.point.base(s2)\
+                    if s1 is not None and s2 is not None else\
+                    bytes([0])
+            return check_or_generate_operation(self, fun, [32, 32], bits)
+
+        def test_scalar_random(self):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            for _ in range(256):
+                s = cls.scalar.random()
+                self.assertTrue(len(s) == 32 and cls.scalar.bytes(s) is not None)
+
+        def test_scalar_bytes(
+                self,
+                bits='4df8fe738c097afa7f255b10c3ab118eeb73e38935605042ccb7581c73f1e5e9'
+            ):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            fun = lambda bs: bitlist([1 if cls.scalar.bytes(bs) is not None else 0])
+            return check_or_generate_operation(self, fun, [32], bits)
+
+        def test_scalar_hash(
+                self,
+                bits='09991cc13ab3799d9c05e0c75968859298977fb7b78efa2dcb6e1689e927ac0e'
+            ):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            return check_or_generate_operation(self, cls.scalar.hash, [32], bits)
+
+        def test_scalar_base64(self):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            for _ in range(256):
+                s = cls.scalar()
+                s_b64 = base64.standard_b64encode(s).decode('utf-8')
+                self.assertEqual(s.to_base64(), s_b64)
+                self.assertEqual(cls.scalar.from_base64(s_b64), s)
+
+        def test_scalar(self):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            for _ in range(256):
+                s = cls.scalar()
+                self.assertTrue(len(s) == 32 and cls.scalar.bytes(s) is not None)
+
+        def test_scalar_inverse(
+                self,
+                bits='41c07230000960b274044a0080a8018aa0114380150000028c2700006081e1e1'
+            ):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            def fun(bs):
+                s = cls.scalar.bytes(bs)
+                return s.inverse() if s is not None else bytes([0])
+            return check_or_generate_operation(self, fun, [32], bits)
+
+        def test_scalar_invert_op(
+                self,
+                bits='41c07230000960b274044a0080a8018aa0114380150000028c2700006081e1e1'
+            ):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            def fun(bs):
+                s = cls.scalar.bytes(bs)
+                return ~s if s is not None else bytes([0])
+            return check_or_generate_operation(self, fun, [32], bits)
+
+        def test_scalar_mul(
+                self,
+                bits='2ca120487000010295804000850254008018000000008000080100008400000c'
+            ):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            def fun(bs):
+                (s1, s2) = (cls.scalar.bytes(bs[:32]), cls.scalar.bytes(bs[32:]))
+                return\
+                    s1 * s2\
+                    if s1 is not None and s2 is not None else\
+                    bytes([0])
+            return check_or_generate_operation(self, fun, [32, 32], bits)
+
+    class Test_types(TestCase):
+        """
+        Tests verifying that methods return objects of the appropriate type.
+        """
+
+        def test_types_point_random(self):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            p = cls.point.random()
+            self.assertTrue(isinstance(p, cls.point))
+
+        def test_types_point_bytes(self):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            (bs,) = fountains(64, limit=1)
+            p = cls.point.bytes(bs)
+            self.assertTrue(isinstance(p, cls.point))
+
+        def test_types_point_hash(self):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            (bs,) = fountains(64, limit=1)
+            p = cls.point.hash(bs)
+            self.assertTrue(isinstance(p, cls.point))
+
+        def test_types_point_base(self):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            p = cls.point.base(cls.scalar.random())
+            self.assertTrue(isinstance(p, cls.point))
+
+        def test_types_point_mul(self):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            (bs,) = fountains(32 + 64, limit=1)
+            (s, p) = (cls.scalar.hash(bs[:32]), cls.point.hash(bs[64:]))
+            self.assertTrue(isinstance(s * p, cls.point))
+
+        def test_types_point_add(self):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            (bs,) = fountains(64 + 64, limit=1)
+            (p0, p1) = (cls.point.hash(bs[:64]), cls.point.hash(bs[64:]))
+            self.assertTrue(isinstance(p0 + p1, cls.point))
+
+        def test_types_point_sub(self):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            (bs,) = fountains(64 + 64, limit=1)
+            (p0, p1) = (cls.point.hash(bs[:64]), cls.point.hash(bs[64:]))
+            self.assertTrue(isinstance(p0 - p1, cls.point))
+
+        def test_types_scalar_random(self):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            self.assertTrue(isinstance(cls.scalar.random(), cls.scalar))
+
+        def test_types_scalar_bytes(self):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            bs = bytes(cls.scalar.random())
+            self.assertTrue(isinstance(cls.scalar.bytes(bs), cls.scalar))
+
+        def test_types_scalar_hash(self):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            (bs,) = fountains(32, limit=1)
+            self.assertTrue(isinstance(cls.scalar.hash(bs), cls.scalar))
+
+        def test_types_scalar_invert(self):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            self.assertTrue(isinstance(~cls.scalar.random(), cls.scalar))
+
+        def test_types_scalar_inverse(self):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            self.assertTrue(isinstance(cls.scalar.random().inverse(), cls.scalar))
+
+        def test_types_scalar_mul_scalar(self):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            (s0, s1) = (cls.scalar.random(), cls.scalar.random())
+            self.assertTrue(isinstance(s0 * s1, cls.scalar))
+
+        def test_types_scalar_mul_point(self):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            (bs,) = fountains(32 + 64, limit=1)
+            (s, p) = (cls.scalar.hash(bs[:32]), cls.point.hash(bs[64:]))
+            self.assertTrue(isinstance(s * p, cls.point))
+
+    class Test_algebra(TestCase):
+        """
+        Tests of algebraic properties of primitive operators.
+        """
+
+        def test_algebra_scalar_inverse_identity(self):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            for bs in fountains(32, limit=256):
+                s = cls.scl(bs)
+                if s is not None:
+                    self.assertEqual(cls.inv(cls.inv(s)), s)
+
+        def test_algebra_scalar_inverse_mul_cancel(self):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            for bs in fountains(32 + 64, limit=256):
+                (s0, p0) = (cls.scl(bs[:32]), cls.pnt(bs[32:]))
+                if s0 is not None:
+                    self.assertEqual(cls.mul(cls.inv(s0), cls.mul(s0, p0)), p0)
+
+        def test_algebra_scalar_mul_commute(self):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            for bs in fountains(32 + 32 + 64, limit=256):
+                (s0, s1, p0) = (cls.scl(bs[:32]), cls.scl(bs[32:64]), cls.pnt(bs[64:]))
+                if s0 is not None and s1 is not None:
+                    self.assertEqual(
+                        cls.mul(s0, cls.mul(s1, p0)),
+                        cls.mul(s1, cls.mul(s0, p0))
+                    )
+
+        def test_algebra_point_add_commute(self):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            for bs in fountains(64 + 64, limit=256):
+                (p0, p1) = (cls.pnt(bs[:64]), cls.pnt(bs[64:]))
+                self.assertEqual(cls.add(p0, p1), cls.add(p1, p0))
+
+        def test_algebra_point_add_sub_cancel(self):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            for bs in fountains(64 + 64, limit=256):
+                (p0, p1) = (cls.pnt(bs[:64]), cls.pnt(bs[64:]))
+                self.assertEqual(cls.add(cls.sub(p0, p1), p1), p0)
+
+        def test_algebra_scalar_mul_point_mul_associate(self):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            for bs in fountains(32 + 32 + 64, limit=256):
+                (s0, s1, p0) = (cls.scl(bs[:32]), cls.scl(bs[32:64]), cls.pnt(bs[64:]))
+                if s0 is not None and s1 is not None:
+                    self.assertEqual(
+                        cls.mul(s0, cls.mul(s1, p0)),
+                        cls.mul(cls.smu(s0, s1), p0)
+                    )
+
+        def test_algebra_scalar_mul_point_add_distribute(self):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            for bs in fountains(32 + 64 + 64, limit=256):
+                (s0, p0, p1) = (cls.scl(bs[:32]), cls.pnt(bs[32:96]), cls.pnt(bs[96:]))
+                if s0 is not None:
+                    self.assertEqual(
+                        cls.add(cls.mul(s0, p0), cls.mul(s0, p1)),
+                        cls.mul(s0, cls.add(p0, p1))
+                    )
+
+        def test_algebra_scalar_mul_scalar_on_right_hand_side_of_non_scalar(self):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            s = cls.scalar.random()
+            self.assertRaises(TypeError, lambda: bytes([0]) * s)
+
+        def test_algebra_scalar_mul_point_on_left_hand_side(self):
+            oblivious.sodium = None if sodium_hidden else oblivious.sodium_restore
+            s = cls.scalar.random()
+            p = cls.point.hash(bytes([0]*32))
+            self.assertRaises(TypeError, lambda: p * s)
+
+    return (
+        Test_primitives,
+        Test_classes,
+        Test_types,
+        Test_algebra
+    )
+
+# The instantiated test classes below are discovered by nose and
+# executed in alphabetical order.
+(Test_primitives_native_no_sodium, Test_classes_native_no_sodium,
+ Test_types_native_no_sodium, Test_algebra_native_no_sodium) =\
+    define_classes(oblivious.native, sodium_hidden=True)
+(Test_primitives_native, Test_classes_native, Test_types_native, Test_algebra_native) =\
+    define_classes(oblivious.native)
+(Test_primitives_sodium, Test_classes_sodium, Test_types_sodium, Test_algebra_sodium) =\
+    define_classes(oblivious.sodium)
