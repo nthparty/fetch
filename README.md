@@ -19,7 +19,7 @@ python -m pip install fetch
 The library can be imported as follows:
 
 ```python
-from fetch import Fetch
+from fetching import Fetching
 ```
 
 Fetch relies on the GitHub API, and as such you will not make Fetch happen unless you \

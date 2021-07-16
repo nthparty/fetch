@@ -1,11 +1,11 @@
 import unittest
 import os
 import warnings
-from fetch import Fetch
+from fetching import Fetching
 
 
 class TestFetch(unittest.TestCase):
-    f = Fetch()
+    f = Fetching()
     fixtures_dir = f"{os.path.dirname(os.path.realpath(__file__))}/fixtures/"
 
     def test_workflow_single_repo(self):
@@ -15,7 +15,7 @@ class TestFetch(unittest.TestCase):
         targets = [
             {
                 "name": "nthparty/fetch",
-                "files": ["fetch/fetch.py"],
+                "files": ["fetch/fetching.py"],
                 "ref": "85d549faeabe134fa312ad304f8504f212c40bad"
             }
         ]
@@ -30,8 +30,8 @@ class TestFetch(unittest.TestCase):
 
         targets = [
             {
-                "name": "nthparty/fetch",
-                "files": ["fetch/fetch.py"],
+                "name": "nthparty/fetching",
+                "files": ["fetching/fetching.py"],
                 "ref": "85d549faeabe134fa312ad304f8504f212c40bad"
             },
             {

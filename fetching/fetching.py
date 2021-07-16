@@ -19,7 +19,7 @@ class Handler:
         return [self.get_file(file, commit) for file in files]
 
 
-class Fetch:
+class Fetching:
 
     @staticmethod
     def resolve_token(token: [str, None]):
