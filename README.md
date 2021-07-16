@@ -1,4 +1,4 @@
-# fetch
+# fetching
 
 Python tool for automatically wrapping multiple (possibly private) Python libraries \
 into a single portable module file.
@@ -13,7 +13,7 @@ package them into a single portable module file.
 The package is available on PyPi:
 
 ```shell
-python -m pip install fetch
+python -m pip install fetching
 ```
 
 The library can be imported as follows:
@@ -22,9 +22,9 @@ The library can be imported as follows:
 from fetching import Fetching
 ```
 
-Fetch relies on the GitHub API, and as such you will not make Fetch happen unless you \
-either pass a valid token to the `fetch_and_build()` method, or store one in either the \
-`GH_TOKEN` or `GITHUB_TOKEN` environment variables.
+Fetching relies on the GitHub API, and as such won't work unless you either pass a valid \
+token to the `fetch_and_build()` method, or store one in either the `GH_TOKEN` or `GITHUB_TOKEN` \
+environment variables.
 
 ## testing
 

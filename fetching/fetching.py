@@ -15,8 +15,25 @@ class Handler:
 
         return content.decoded_content.decode("utf-8")
 
-    def get_files(self, files: list, commit: [str, None]):
-        return [self.get_file(file, commit) for file in files]
+    def get_files_by_ref(self, files: list, ref: [str, None]):
+        return [self.get_file(file, ref) for file in files]
+
+    def _get_ref_for_tag(self, tag: str):
+
+        tags = self.repo.get_tags()
+        for t in tags:
+            if t.name == tag:
+                return t.commit.sha
+
+        return None
+
+    def get_files_by_tag(self, files: list, tag: str):
+
+        ref = self._get_ref_for_tag(tag)
+        if ref is None:
+            raise ValueError(f"Error: Unable to locate tag {tag} for repository {self.repo.name}.")
+
+        return self.get_files_by_ref(files, ref)
 
 
 class Fetching:
@@ -42,9 +59,15 @@ class Fetching:
         ret = []
         token = self.resolve_token(token)
         for t in targets:
-            ret.append(
-                Handler(t.get("name"), token).get_files(t.get("files"), t.get("ref"))
-            )
+
+            if t.get("tag") is not None:
+                ret.extend(
+                    Handler(t.get("name"), token).get_files_by_tag(t.get("files"), t.get("tag"))
+                )
+            else:
+                ret.extend(
+                    Handler(t.get("name"), token).get_files_by_ref(t.get("files"), t.get("ref"))
+                )
 
         return ret
 
@@ -65,7 +88,7 @@ class Fetching:
         return "\n".join(ret)
 
     def build(self, dependencies: list):
-        return "\n".join("\n".join([self._filter_main(f) for f in d]) for d in dependencies)
+        return "\n".join([self._filter_main(d) for d in dependencies])
 
     @staticmethod
     def write(dest: str, content: str):

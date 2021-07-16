@@ -1,0 +1,223 @@
+# Copyright 2013 Donald Stufft
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+import io
+import os
+import re
+import zipfile
+from typing import List
+from typing import Optional
+
+from pkginfo import distribution
+
+from twine import exceptions
+
+# Monkeypatch Metadata 2.0 support
+distribution.HEADER_ATTRS_2_0 = distribution.HEADER_ATTRS_1_2
+distribution.HEADER_ATTRS.update({"2.0": distribution.HEADER_ATTRS_2_0})
+
+
+wheel_file_re = re.compile(
+    r"""^(?P<namever>(?P<name>.+?)(-(?P<ver>\d.+?))?)
+        ((-(?P<build>\d.*?))?-(?P<pyver>.+?)-(?P<abi>.+?)-(?P<plat>.+?)
+        \.whl|\.dist-info)$""",
+    re.VERBOSE,
+)
+
+
+class Wheel(distribution.Distribution):
+    def __init__(self, filename: str, metadata_version: Optional[str] = None) -> None:
+        self.filename = filename
+        self.basefilename = os.path.basename(self.filename)
+        self.metadata_version = metadata_version
+        self.extractMetadata()
+
+    @property
+    def py_version(self) -> str:
+        wheel_info = wheel_file_re.match(self.basefilename)
+        if wheel_info is None:
+            return "any"
+        else:
+            return wheel_info.group("pyver")
+
+    @staticmethod
+    def find_candidate_metadata_files(names: List[str]) -> List[List[str]]:
+        """Filter files that may be METADATA files."""
+        tuples = [x.split("/") for x in names if "METADATA" in x]
+        return [x[1] for x in sorted([(len(x), x) for x in tuples])]
+
+    def read(self) -> bytes:
+        fqn = os.path.abspath(os.path.normpath(self.filename))
+        if not os.path.exists(fqn):
+            raise exceptions.InvalidDistribution("No such file: %s" % fqn)
+
+        if fqn.endswith(".whl"):
+            archive = zipfile.ZipFile(fqn)
+            names = archive.namelist()
+
+            def read_file(name: str) -> bytes:
+                return archive.read(name)
+
+        else:
+            raise exceptions.InvalidDistribution(
+                "Not a known archive format for file: %s" % fqn
+            )
+
+        try:
+            for path in self.find_candidate_metadata_files(names):
+                candidate = "/".join(path)
+                data = read_file(candidate)
+                if b"Metadata-Version" in data:
+                    return data
+        finally:
+            archive.close()
+
+        raise exceptions.InvalidDistribution("No METADATA in archive: %s" % fqn)
+
+    def parse(self, data: bytes) -> None:
+        super().parse(data)
+
+        fp = io.StringIO(distribution.must_decode(data))
+        msg = distribution.parse(fp)
+        self.description = msg.get_payload()
+
+#!/usr/bin/env python3
+# Copyright 2013 Donald Stufft
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+import http
+import sys
+from typing import Any
+
+import colorama
+import requests
+
+from twine import cli
+from twine import exceptions
+
+
+def main() -> Any:
+    try:
+        result = cli.dispatch(sys.argv[1:])
+    except requests.HTTPError as exc:
+        status_code = exc.response.status_code
+        status_phrase = http.HTTPStatus(status_code).phrase
+        result = (
+            f"{exc.__class__.__name__}: {status_code} {status_phrase} "
+            f"from {exc.response.url}\n"
+            f"{exc.response.reason}"
+        )
+    except exceptions.TwineException as exc:
+        result = f"{exc.__class__.__name__}: {exc.args[0]}"
+
+    return _format_error(result) if isinstance(result, str) else result
+
+
+def _format_error(message: str) -> str:
+    pre_style, post_style = "", ""
+    if not cli.args.no_color:
+        colorama.init()
+        pre_style, post_style = colorama.Fore.RED, colorama.Style.RESET_ALL
+
+    return f"{pre_style}{message}{post_style}"
+
+
+import os
+import sys
+
+from setuptools import find_packages, setup
+
+
+def read(rel_path):
+    # type: (str) -> str
+    here = os.path.abspath(os.path.dirname(__file__))
+    # intentionally *not* adding an encoding option to open, See:
+    #   https://github.com/pypa/virtualenv/issues/201#issuecomment-3145690
+    with open(os.path.join(here, rel_path)) as fp:
+        return fp.read()
+
+
+def get_version(rel_path):
+    # type: (str) -> str
+    for line in read(rel_path).splitlines():
+        if line.startswith("__version__"):
+            # __version__ = "0.9"
+            delim = '"' if '"' in line else "'"
+            return line.split(delim)[1]
+    raise RuntimeError("Unable to find version string.")
+
+
+long_description = read("README.rst")
+
+setup(
+    name="pip",
+    version=get_version("src/pip/__init__.py"),
+    description="The PyPA recommended tool for installing Python packages.",
+    long_description=long_description,
+    license="MIT",
+    classifiers=[
+        "Development Status :: 5 - Production/Stable",
+        "Intended Audience :: Developers",
+        "License :: OSI Approved :: MIT License",
+        "Topic :: Software Development :: Build Tools",
+        "Programming Language :: Python",
+        "Programming Language :: Python :: 3",
+        "Programming Language :: Python :: 3 :: Only",
+        "Programming Language :: Python :: 3.6",
+        "Programming Language :: Python :: 3.7",
+        "Programming Language :: Python :: 3.8",
+        "Programming Language :: Python :: 3.9",
+        "Programming Language :: Python :: Implementation :: CPython",
+        "Programming Language :: Python :: Implementation :: PyPy",
+    ],
+    url="https://pip.pypa.io/",
+    project_urls={
+        "Documentation": "https://pip.pypa.io",
+        "Source": "https://github.com/pypa/pip",
+        "Changelog": "https://pip.pypa.io/en/stable/news/",
+    },
+    author="The pip developers",
+    author_email="distutils-sig@python.org",
+    package_dir={"": "src"},
+    packages=find_packages(
+        where="src",
+        exclude=["contrib", "docs", "tests*", "tasks"],
+    ),
+    package_data={
+        "pip": ["py.typed"],
+        "pip._vendor": ["vendor.txt"],
+        "pip._vendor.certifi": ["*.pem"],
+        "pip._vendor.requests": ["*.pem"],
+        "pip._vendor.distlib._backport": ["sysconfig.cfg"],
+        "pip._vendor.distlib": ["t32.exe", "t64.exe", "w32.exe", "w64.exe"],
+    },
+    entry_points={
+        "console_scripts": [
+            "pip=pip._internal.cli.main:main",
+            "pip{}=pip._internal.cli.main:main".format(sys.version_info[0]),
+            "pip{}.{}=pip._internal.cli.main:main".format(*sys.version_info[:2]),
+        ],
+    },
+    zip_safe=False,
+    python_requires=">=3.6",
+)

@@ -1,15 +1,16 @@
 import github
+import os
 
 
 class Handler:
     def __init__(self, name: str, auth: str):
         self.repo = github.Github(auth).get_repo(name)
 
-    def get_file(self, file_path: str, commit: [str, None]):
+    def get_file(self, file_path: str, ref: [str, None]):
 
         content = \
-            self.repo.get_contents(file_path, ref=commit) \
-            if commit is not None \
+            self.repo.get_contents(file_path, ref=ref) \
+            if ref is not None \
             else self.repo.get_contents(file_path)
 
         return content.decoded_content.decode("utf-8")
@@ -18,34 +19,44 @@ class Handler:
         return [self.get_file(file, commit) for file in files]
 
 
-class Fetch:
+class Fetching:
 
     @staticmethod
-    def fetch(targets: list, auth: [str, None]):
+    def resolve_token(token: [str, None]):
+        """
+        resolve API token according to order of precedence from
+        GH docs: https://cli.github.com/manual/gh_help_environment
+        """
+
+        if token is not None:
+            return token
+        elif os.getenv("GH_TOKEN") is not None:
+            return os.getenv("GH_TOKEN")
+        elif os.getenv("GITHUB_TOKEN") is not None:
+            return os.getenv("GITHUB_TOKEN")
+        else:
+            raise ValueError("Unable to locate GitHub API token.")
+
+    def fetch(self, targets: list, token: [str, None] = None):
 
         ret = []
+        token = self.resolve_token(token)
         for t in targets:
-            auth = t.get("token") if t.get("token") is not None else auth
             ret.append(
-                Handler(t.get("name"), auth).get_files(t.get("files"), t.get("commit"))
+                Handler(t.get("name"), token).get_files(t.get("files"), t.get("ref"))
             )
 
         return ret
 
     @staticmethod
-    def build(dest: str, dependencies: list):
+    def _filter_main(f: str):
+        """
+        extract contents of file up until main invocation, if it exists
+        """
 
-        with open(dest, "w") as out:
-            for dep in dependencies:
-                for file in dep:
-                    out.write(file)
-                    out.write("\n")
-
-    def fetch_and_build(self, dest: str, targets: list, token: [str, None]):
-
-        dependencies = self.fetch(targets, token)
-        self.build(dest, dependencies)
-
+        lines = f.split("\n")
+        ret = []
+        for l in lines:
 """Common cryptographic primitives for OT and OPRF.
 
 Python library that serves as an API for common primitives
