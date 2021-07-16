@@ -21,7 +21,7 @@ class TestFetch(unittest.TestCase):
 
         targets = [
             {
-                "name": "nthparty/fetch",
+                "name": "nthparty/fetching",
                 "files": ["fetching/fetching.py"],
                 "ref": "055ad6af491f5cd7d308f4fbc5c32852d8748f59"
             }
