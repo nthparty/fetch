@@ -8,12 +8,26 @@ class TestFetch(unittest.TestCase):
     f = Fetching()
     fixtures_dir = f"{os.path.dirname(os.path.realpath(__file__))}/fixtures/"
 
-    def fetch_build_compare(self, targets: list, compare_file: str):
+    def fetch_build_compare_source(self, targets: list, compare_file: str):
 
-        dependencies = self.f.fetch(targets)
-        content = self.f.build(dependencies)
+        dependencies = self.f.fetch_source(targets)
+        content = self.f.build_dependencies(dependencies)
 
-        return content == open(f"{self.fixtures_dir}/{compare_file}").read()
+        return content == open(f"{self.fixtures_dir}/source/{compare_file}").read()
+
+    def fetch_build_compare_requirements(self, targets: list, compare_file: str):
+
+        reqs = self.f.fetch_requirements(targets)
+        content = self.f.build_requirements(reqs)
+        compare_to = set(
+            (open(f"{self.fixtures_dir}/requirements/{compare_file}").read()).split("\n")
+        )
+
+        reqs_equal = \
+            set(content.split("\n")) == compare_to
+        req_lens_equal = len(content.split("\n")) == len(compare_to)
+
+        return reqs_equal and req_lens_equal
 
     def test_single_by_ref(self):
 
@@ -27,7 +41,8 @@ class TestFetch(unittest.TestCase):
             }
         ]
 
-        self.assertTrue(self.fetch_build_compare(targets, "fetch_single_by_ref.txt"))
+        self.assertTrue(self.fetch_build_compare_source(targets, "fetch_single_by_ref.txt"))
+        self.assertTrue(self.fetch_build_compare_requirements(targets, "fetch_single_by_ref.txt"))
 
     def test_multiple_by_ref(self):
 
@@ -43,10 +58,16 @@ class TestFetch(unittest.TestCase):
                 "name": "nthparty/oblivious",
                 "files": ["oblivious/oblivious.py", "test/test_oblivious.py"],
                 "ref": "daa92da7197cdcd5dfc89854fa1b672f37096e74"
+            },
+            {
+                "name": "nthparty/progress-tracker",
+                "files": ["progress.py"],
+                "ref": "3928449a1205342a49a88e4c01827df69fca85e1"
             }
         ]
 
-        self.assertTrue(self.fetch_build_compare(targets, "fetch_multiple_by_ref.txt"))
+        self.assertTrue(self.fetch_build_compare_source(targets, "fetch_multiple_by_ref.txt"))
+        self.assertTrue(self.fetch_build_compare_requirements(targets, "fetch_multiple_by_ref.txt"))
 
     def test_single_by_tag(self):
 
@@ -60,7 +81,8 @@ class TestFetch(unittest.TestCase):
             }
         ]
 
-        self.assertTrue(self.fetch_build_compare(targets, "fetch_single_by_tag.txt"))
+        self.assertTrue(self.fetch_build_compare_source(targets, "fetch_single_by_tag.txt"))
+        self.assertTrue(self.fetch_build_compare_requirements(targets, "fetch_single_by_tag.txt"))
 
     def test_multiple_by_tag(self):
 
@@ -79,7 +101,8 @@ class TestFetch(unittest.TestCase):
             }
         ]
 
-        self.assertTrue(self.fetch_build_compare(targets, "fetch_multiple_by_tag.txt"))
+        self.assertTrue(self.fetch_build_compare_source(targets, "fetch_multiple_by_tag.txt"))
+        self.assertTrue(self.fetch_build_compare_requirements(targets, "fetch_multiple_by_tag.txt"))
 
     def test_mixed(self):
 
@@ -108,4 +131,5 @@ class TestFetch(unittest.TestCase):
             }
         ]
 
-        self.assertTrue(self.fetch_build_compare(targets, "fetch_mixed.txt"))
+        self.assertTrue(self.fetch_build_compare_source(targets, "fetch_mixed.txt"))
+        self.assertTrue(self.fetch_build_compare_requirements(targets, "fetch_mixed.txt"))

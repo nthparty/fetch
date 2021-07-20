@@ -4,19 +4,26 @@ import os
 
 class Handler:
     def __init__(self, name: str, auth: str):
+        self.name = name
         self.repo = github.Github(auth).get_repo(name)
 
     def get_file(self, file_path: str, ref: [str, None]):
 
-        content = \
-            self.repo.get_contents(file_path, ref=ref) \
-            if ref is not None \
-            else self.repo.get_contents(file_path)
+        try:
+            content = \
+                self.repo.get_contents(file_path, ref=ref) \
+                if ref is not None \
+                else self.repo.get_contents(file_path)
 
-        return content.decoded_content.decode("utf-8")
+            return content.decoded_content.decode("utf-8")
+        except github.GithubException:
+            print(f"Could not locate file {file_path} in repository {self.name} with ref {ref}.")
+            return None
 
     def get_files_by_ref(self, files: list, ref: [str, None]):
-        return [self.get_file(file, ref) for file in files]
+
+        files = [self.get_file(file, ref) for file in files]
+        return [f for f in files if f is not None]
 
     def _get_ref_for_tag(self, tag: str):
 
@@ -54,20 +61,33 @@ class Fetching:
         else:
             raise ValueError("Unable to locate GitHub API token.")
 
-    def fetch(self, targets: list, token: [str, None] = None):
+    @staticmethod
+    def _fetch(target: dict, token: str):
+
+        if target.get("tag") is not None:
+            return Handler(target.get("name"), token).get_files_by_tag(target.get("files"), target.get("tag"))
+        else:
+            return Handler(target.get("name"), token).get_files_by_ref(target.get("files"), target.get("ref"))
+
+    def fetch_requirements(self, targets: list, token: [str, None] = None):
 
         ret = []
         token = self.resolve_token(token)
-        for t in targets:
 
-            if t.get("tag") is not None:
-                ret.extend(
-                    Handler(t.get("name"), token).get_files_by_tag(t.get("files"), t.get("tag"))
-                )
-            else:
-                ret.extend(
-                    Handler(t.get("name"), token).get_files_by_ref(t.get("files"), t.get("ref"))
-                )
+        for t in targets:
+            t["files"] = ["requirements.txt"]
+            ret.extend(self._fetch(t, token))
+
+        return ret
+
+    def fetch_source(self, targets: list, token: [str, None] = None):
+
+        ret = []
+        token = self.resolve_token(token)
+
+        for t in targets:
+            t["files"] = [f for f in t.get("files", []) if f != "requirements.txt"]
+            ret.extend(self._fetch(t, token))
 
         return ret
 
@@ -87,8 +107,20 @@ class Fetching:
 
         return "\n".join(ret)
 
-    def build(self, dependencies: list):
+    def build_dependencies(self, dependencies: list):
         return "\n".join([self._filter_main(d) for d in dependencies])
+
+    @staticmethod
+    def build_requirements(requirements: list):
+        """
+        filter repeats from concatenated requirements.txt file contents
+        """
+
+        return "\n".join(
+            list(set(
+                [lib for file in requirements for lib in file.split("\n") if lib != ""])
+            )
+        )
 
     @staticmethod
     def write(dest: str, content: str):
@@ -97,7 +129,10 @@ class Fetching:
 
     def fetch_and_build(self, targets: list, token: [str, None]):
 
-        dependencies = self.fetch(targets, token)
-        content = self.build(dependencies)
+        dependencies = self.fetch_source(targets, token)
+        requirements = self.fetch_requirements(targets, token)
 
-        return content
+        source_code = self.build_dependencies(dependencies)
+        source_requirements = self.build_requirements(requirements)
+
+        return [source_code, source_requirements]
