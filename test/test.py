@@ -1,30 +1,25 @@
 import unittest
 import os
 import warnings
-from fetching import Fetching
+from fetching import Fetching, fetch
 
 
 class TestFetch(unittest.TestCase):
-    f = Fetching()
     fixtures_dir = f"{os.path.dirname(os.path.realpath(__file__))}/fixtures/"
 
     def fetch_build_compare_source(self, targets: list, compare_file: str):
 
-        dependencies = self.f.fetch_source(targets)
-        content = self.f.build_dependencies(dependencies)
-
+        content, _ = fetch(targets)
         return content == open(f"{self.fixtures_dir}/source/{compare_file}").read()
 
     def fetch_build_compare_requirements(self, targets: list, compare_file: str):
 
-        reqs = self.f.fetch_requirements(targets)
-        content = self.f.build_requirements(reqs)
+        _, content = fetch(targets)
         compare_to = set(
             (open(f"{self.fixtures_dir}/requirements/{compare_file}").read()).split("\n")
         )
 
-        reqs_equal = \
-            set(content.split("\n")) == compare_to
+        reqs_equal = set(content.split("\n")) == compare_to
         req_lens_equal = len(content.split("\n")) == len(compare_to)
 
         return reqs_equal and req_lens_equal
